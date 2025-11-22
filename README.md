@@ -1,323 +1,253 @@
-# DeepSeek-OCR Local Testing Setup
+# Ollama DeepSeek-OCR Scripts
 
-This repository contains scripts to run DeepSeek-OCR locally on your laptop for evaluating its capabilities on your specific use case.
+Simple scripts for using Ollama's deepseek-ocr model for batch image processing and PDF conversion.
 
-## What is DeepSeek-OCR?
+## Prerequisites
 
-DeepSeek-OCR is a 3B parameter open vision-language model designed for document understanding. It can:
+1. Install Ollama: https://ollama.com
+2. Pull the model:
+   ```bash
+   ollama pull deepseek-ocr
+   ```
 
-- Extract text from documents, handwritten notes, and images
-- Parse tables and charts into structured formats (HTML)
-- Extract mathematical equations as LaTeX
-- Recognize chemical formulas and structures
-- Handle multilingual documents
-- Process memes and social media images
+## PDF to Markdown Converter
 
-## System Requirements
+Convert entire PDFs to markdown with `pdf_to_markdown.py`:
 
-### Minimum Requirements
-- **RAM**: 8GB+ (16GB recommended)
-- **Storage**: 10GB free space for model weights
-- **OS**: Windows, Linux, or macOS
-- **Python**: 3.8 or higher
-
-### Recommended for Good Performance
-- **GPU**: NVIDIA GPU with 8GB+ VRAM (RTX 3060 or better)
-- **CUDA**: 11.8 or higher
-- **RAM**: 16GB+
-
-### Performance Notes
-- **With GPU**: 5-15 seconds per image
-- **Without GPU (CPU only)**: 1-5 minutes per image (VERY slow, but works)
-
-## Installation
-
-### Step 1: Clone or Download This Repository
-
-If you haven't already, save all files to a directory on your laptop.
-
-### Step 2: Create a Virtual Environment (Recommended)
-
-```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
-
-# Linux/Mac
-python3 -m venv venv
-source venv/bin/activate
-```
-
-### Step 3: Install Dependencies
+### Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-**Note for CPU-only users**: If you don't have a CUDA-capable GPU, install CPU-only PyTorch first:
+**System Requirements:**
+- **Linux**: `sudo apt install poppler-utils`
+- **Mac**: `brew install poppler`
+- **Windows**: Download poppler from https://github.com/oschwartz10612/poppler-windows/releases/
+
+### Usage
 
 ```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements.txt
+# Basic usage - converts document.pdf to document.md
+python pdf_to_markdown.py document.pdf
+
+# Custom output path
+python pdf_to_markdown.py document.pdf -o output.md
+
+# Higher quality (slower, better for small text)
+python pdf_to_markdown.py document.pdf --dpi 600
+
+# Custom prompt for specific extraction
+python pdf_to_markdown.py document.pdf --prompt "Extract all text and preserve formatting"
+
+# No page separators (continuous markdown)
+python pdf_to_markdown.py document.pdf --no-separator
 ```
 
-### Step 4: Hugging Face Authentication (Required)
+**Features:**
+- Converts each PDF page to an image
+- Processes through deepseek-ocr with customizable prompts
+- Combines all pages into a single markdown file
+- Configurable DPI for quality/speed tradeoff
+- Progress tracking for multi-page documents
 
-DeepSeek-OCR is hosted on Hugging Face and requires authentication:
+## Interactive Usage
 
-1. Create a free account at https://huggingface.co
-2. Generate an access token:
-   - Go to Settings → Access Tokens
-   - Click "New token"
-   - Select "Read" permission
-   - Copy the token
-
-3. Login via CLI:
-```bash
-pip install huggingface-hub
-huggingface-cli login
-```
-Paste your token when prompted.
-
-## Usage
-
-### Option 1: Command-Line Script (Recommended for Testing)
-
-The basic script is perfect for quick tests and batch processing.
-
-#### Basic Usage
+For single images, just use Ollama directly:
 
 ```bash
-python ocr_basic.py <image_path>
+ollama run deepseek-ocr "Extract text from this image" path/to/image.jpg
 ```
 
-Example:
-```bash
-python ocr_basic.py my_document.jpg
-```
+## Batch Processing Scripts
 
-#### List Available Modes
+### Bash Script (Linux/Mac/WSL)
 
-```bash
-python ocr_basic.py --list-modes
-```
-
-Available modes:
-- `document` - Extract full document as Markdown
-- `chart` - Extract charts/tables as HTML
-- `chemistry` - Extract chemical structures
-- `handwriting` - OCR handwritten text
-- `equation` - Extract equations as LaTeX
-- `table` - Extract tables as HTML
-- `multilingual` - Extract multi-language content
-- `plain` - Fast plain text OCR
-
-#### Use Specific Mode
+Save as `batch_ocr.sh`:
 
 ```bash
-python ocr_basic.py invoice.pdf --mode table
-python ocr_basic.py notes.jpg --mode handwriting
-python ocr_basic.py chart.png --mode chart
+#!/bin/bash
+
+# Process all images in a directory
+INPUT_DIR="${1:-.}"
+OUTPUT_DIR="${2:-./ocr_results}"
+PROMPT="${3:-Extract all text from this image}"
+
+mkdir -p "$OUTPUT_DIR"
+
+for img in "$INPUT_DIR"/*.{jpg,jpeg,png,JPG,JPEG,PNG}; do
+    [ -e "$img" ] || continue
+
+    filename=$(basename "$img")
+    name="${filename%.*}"
+
+    echo "Processing: $filename"
+
+    ollama run deepseek-ocr "$PROMPT" "$img" > "$OUTPUT_DIR/${name}.txt"
+
+    echo "✓ Saved to: $OUTPUT_DIR/${name}.txt"
+done
+
+echo "Done! Results in: $OUTPUT_DIR"
 ```
 
-#### Custom Prompt
-
+Usage:
 ```bash
-python ocr_basic.py image.jpg --prompt "<image>\nExtract only the title and author name."
+chmod +x batch_ocr.sh
+./batch_ocr.sh ./images ./results "Extract text from this document"
 ```
 
-#### Specify Output Directory
+### PowerShell Script (Windows)
 
+Save as `batch_ocr.ps1`:
+
+```powershell
+param(
+    [string]$InputDir = ".",
+    [string]$OutputDir = ".\ocr_results",
+    [string]$Prompt = "Extract all text from this image"
+)
+
+New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+
+$extensions = @("*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG")
+
+foreach ($ext in $extensions) {
+    Get-ChildItem -Path $InputDir -Filter $ext | ForEach-Object {
+        $filename = $_.Name
+        $basename = $_.BaseName
+        $outputFile = Join-Path $OutputDir "$basename.txt"
+
+        Write-Host "Processing: $filename"
+
+        ollama run deepseek-ocr "$Prompt" $_.FullName | Out-File -FilePath $outputFile
+
+        Write-Host "✓ Saved to: $outputFile"
+    }
+}
+
+Write-Host "Done! Results in: $OutputDir"
+```
+
+Usage:
+```powershell
+.\batch_ocr.ps1 -InputDir .\images -OutputDir .\results -Prompt "Extract text from this document"
+```
+
+## Different OCR Tasks
+
+### Extract Tables
 ```bash
-python ocr_basic.py document.jpg --output ./results/doc1
+ollama run deepseek-ocr "Extract all tables as HTML" table.jpg > table.html
 ```
 
-#### Force CPU Mode
-
+### Extract Handwriting
 ```bash
-python ocr_basic.py image.jpg --device cpu
+ollama run deepseek-ocr "Extract all handwritten text" notes.jpg > notes.txt
 ```
 
-### Option 2: Gradio Web Interface (Recommended for Interactive Testing)
-
-The Gradio app provides a user-friendly web interface.
-
-#### Launch the App
-
+### Extract Math Equations
 ```bash
-python ocr_gradio_app.py
+ollama run deepseek-ocr "Extract all mathematical equations in LaTeX format" equation.jpg > equations.tex
 ```
 
-Then open your browser to: **http://127.0.0.1:7860**
-
-#### Using the Web Interface
-
-1. Upload an image using the file picker
-2. Select an OCR mode from the dropdown
-3. (Optional) Adjust advanced settings
-4. Click "Process Image"
-5. View extracted text and bounding boxes
-
-The model will load automatically on first use (this takes 30-60 seconds).
-
-## Testing Your Use Case
-
-### Step 1: Prepare Test Images
-
-Gather 5-10 representative images that reflect your actual use case:
-- Scanned documents
-- Photos of receipts or invoices
-- Screenshots of charts
-- Handwritten notes
-- Technical diagrams
-- Multilingual documents
-
-### Step 2: Run Tests
-
-Create a test directory:
-
+### Convert Document to Markdown
 ```bash
-mkdir test_images
-# Copy your test images here
+ollama run deepseek-ocr "Convert the document to markdown" document.jpg > document.md
 ```
 
-Process each image:
-
+### Extract Charts
 ```bash
-python ocr_basic.py test_images/image1.jpg --mode document
-python ocr_basic.py test_images/image2.jpg --mode table
-python ocr_basic.py test_images/image3.jpg --mode chart
+ollama run deepseek-ocr "Parse all charts and tables. Extract data as HTML tables" chart.png > chart.html
 ```
 
-Or use the Gradio app for visual comparison.
+## Python Script (Optional)
 
-### Step 3: Evaluate Results
-
-For each test, check:
-
-1. **Accuracy**: Is the extracted text correct?
-2. **Structure**: Is formatting preserved (tables, lists, etc.)?
-3. **Completeness**: Is all text detected?
-4. **Speed**: Is processing time acceptable?
-5. **Output Format**: Is the output format usable for your workflow?
-
-Results are saved in timestamped folders:
-- `output_YYYYMMDD_HHMMSS/result.txt` - Extracted text
-- `output_YYYYMMDD_HHMMSS/result_with_boxes.jpg` - Visual overlay
-
-### Step 4: Compare with Alternatives
-
-If evaluating multiple OCR solutions, test the same images with:
-- Tesseract OCR
-- PaddleOCR
-- Cloud services (Google Vision API, AWS Textract)
-
-Compare on: accuracy, speed, ease of use, and cost.
-
-## Common Issues and Solutions
-
-### Issue: "CUDA out of memory"
-
-**Solution**: Reduce image size or use CPU mode:
-```bash
-python ocr_basic.py image.jpg --device cpu
-```
-
-### Issue: "Model download is very slow"
-
-**Solution**: The model is ~6GB. On slow connections, this can take 10-30 minutes on first run. Be patient. Subsequent runs will be fast.
-
-### Issue: "Division by zero error"
-
-**Solution**: This is a known harmless bug in the model's compression stats. The script handles it automatically. Results are still valid.
-
-### Issue: "Extracted text is empty"
-
-**Possible causes**:
-- Image quality too low
-- Text is too small in the image
-- Wrong mode selected
-
-**Try**:
-- Increase image resolution
-- Use a different mode
-- Adjust base_size/image_size in advanced settings
-
-### Issue: "Running on CPU is extremely slow"
-
-**Solution**: This is expected. CPU inference can take 1-5 minutes per image. Consider:
-- Using a cloud GPU service (Google Colab, Paperspace)
-- Batch processing overnight
-- Upgrading to a GPU-equipped machine
-
-## Output Files Explained
-
-Each run creates a directory with these files:
-
-- **input.png** - Preprocessed input image
-- **result.txt** or **result.mmd** - Extracted text (Markdown or plain)
-- **result_with_boxes.jpg** - Input image with bounding boxes overlaid
-- **result_boxes.json** - Detected text regions in JSON format (if available)
-
-## Tips for Best Results
-
-1. **Image Quality**: Higher resolution = better accuracy (but slower)
-2. **Mode Selection**: Choose the mode that matches your document type
-3. **Preprocessing**: Rotate/crop images before processing if needed
-4. **Batch Processing**: Write a simple loop script for multiple files
-5. **GPU Usage**: Always use GPU if available (20-50x faster)
-
-## Example Batch Processing Script
-
-Create `batch_process.py`:
+If you prefer Python, save as `batch_ocr.py`:
 
 ```python
-import os
-import glob
-from ocr_basic import load_model, process_image
+#!/usr/bin/env python3
+import subprocess
+import sys
+from pathlib import Path
 
-# Load model once
-model, tok = load_model()
+def process_images(input_dir=".", output_dir="ocr_results", prompt="Extract all text from this image"):
+    input_path = Path(input_dir)
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True)
 
-# Process all images in a folder
-for img_path in glob.glob("test_images/*.jpg"):
-    print(f"\nProcessing: {img_path}")
-    output_dir = f"results/{os.path.basename(img_path)}_output"
-    process_image(model, tok, img_path, mode="document", output_dir=output_dir)
-    print(f"Saved to: {output_dir}")
+    extensions = [".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"]
+    images = [f for f in input_path.iterdir() if f.suffix in extensions]
+
+    if not images:
+        print(f"No images found in {input_dir}")
+        return
+
+    print(f"Found {len(images)} images to process\n")
+
+    for img in images:
+        print(f"Processing: {img.name}")
+        output_file = output_path / f"{img.stem}.txt"
+
+        result = subprocess.run(
+            ["ollama", "run", "deepseek-ocr", prompt, str(img)],
+            capture_output=True,
+            text=True
+        )
+
+        output_file.write_text(result.stdout)
+        print(f"✓ Saved to: {output_file}\n")
+
+    print(f"Done! Results in: {output_dir}")
+
+if __name__ == "__main__":
+    input_dir = sys.argv[1] if len(sys.argv) > 1 else "."
+    output_dir = sys.argv[2] if len(sys.argv) > 2 else "ocr_results"
+    prompt = sys.argv[3] if len(sys.argv) > 3 else "Extract all text from this image"
+
+    process_images(input_dir, output_dir, prompt)
 ```
 
-Run:
+Usage:
 ```bash
-python batch_process.py
+chmod +x batch_ocr.py
+./batch_ocr.py ./images ./results "Extract text from this document"
 ```
 
-## Next Steps
+## Tips
 
-After evaluating DeepSeek-OCR on your use case:
+1. **Model loading**: First request takes longer (model loads into memory)
+2. **Concurrent processing**: For faster batch processing, run multiple ollama instances in parallel:
+   ```bash
+   for img in images/*.jpg; do
+       ollama run deepseek-ocr "Extract text" "$img" > "results/$(basename "$img" .jpg).txt" &
+   done
+   wait
+   ```
+3. **Custom prompts**: Tailor prompts to your specific needs for better results
+4. **Image quality**: Higher resolution images = better accuracy (but slower)
 
-1. **Document findings**: Track accuracy, speed, and edge cases
-2. **Compare alternatives**: Test other OCR solutions
-3. **Prototype integration**: If results are good, integrate into your pipeline
-4. **Optimize**: Fine-tune parameters or add preprocessing steps
+## Example Workflows
+
+### Receipt Processing
+```bash
+for receipt in receipts/*.jpg; do
+    ollama run deepseek-ocr "Extract: vendor name, date, total amount, items" "$receipt" > "parsed/$(basename "$receipt" .jpg).txt"
+done
+```
+
+### Invoice Data Extraction
+```bash
+ollama run deepseek-ocr "Extract as JSON: {invoice_number, date, vendor, total, line_items}" invoice.pdf
+```
+
+### Form Processing
+```bash
+ollama run deepseek-ocr "Extract all filled form fields and their values" form.jpg
+```
 
 ## Resources
 
-- **Model**: https://huggingface.co/deepseek-ai/DeepSeek-OCR
-- **Paper**: https://arxiv.org/abs/2501.12558
-- **GitHub**: https://github.com/deepseek-ai/DeepSeek-OCR
-
-## License
-
-This code is provided as-is for evaluation purposes. Check the DeepSeek-OCR model license on Hugging Face for commercial use restrictions.
-
-## Support
-
-For issues with:
-- **This code**: Open an issue or modify the scripts as needed
-- **The model**: Check the official DeepSeek-OCR repository
-- **Hugging Face**: Visit https://huggingface.co/docs
-
----
-
-**Happy testing!** If you find this useful for your use case, consider starring the original DeepSeek-OCR repository.
+- Ollama: https://ollama.com
+- DeepSeek-OCR Model: https://huggingface.co/deepseek-ai/DeepSeek-OCR
+- DeepSeek-OCR Paper: https://arxiv.org/abs/2501.12558
