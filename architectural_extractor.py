@@ -10,6 +10,7 @@ import subprocess
 import json
 import sys
 import re
+import csv
 from pathlib import Path
 from pdf2image import convert_from_path
 from PIL import Image
@@ -18,8 +19,8 @@ from PIL import Image
 class ArchitecturalExtractor:
     """Extract architectural dimensions and measurements from floor plans"""
 
-    # Proven pattern from pdf_to_markdown.py - simple and direct
-    EXTRACTION_PROMPT = "<image>\n<|grounding|>Extract all text and numbers from this image."
+    # Simple prompt without grounding - may capture more dimension numbers
+    EXTRACTION_PROMPT = "<image>\nExtract all text and numbers from this document."
 
     def __init__(self, verbose=True):
         self.verbose = verbose
@@ -164,16 +165,56 @@ class ArchitecturalExtractor:
 
         return None
 
+    def parse_grounding_format(self, text):
+        """Parse grounding format output with text and bounding boxes"""
+        import re
+
+        # Pattern to match <|ref|>TEXT<|/ref|><|det|>[[x1,y1,x2,y2]]<|/det|>
+        pattern = r'<\|ref\|>(.*?)<\/\|ref\|><\|det\|>\[\[([\d\s,]+)\]\]<\/\|det\|>'
+        matches = re.findall(pattern, text)
+
+        grounded_items = []
+        for text_content, coords_str in matches:
+            try:
+                # Parse coordinates
+                coords = [int(x.strip()) for x in coords_str.split(',')]
+                if len(coords) == 4:
+                    x1, y1, x2, y2 = coords
+                    grounded_items.append({
+                        'text': text_content.strip(),
+                        'bbox': [x1, y1, x2, y2],
+                        'width': x2 - x1,
+                        'height': y2 - y1,
+                        'center_x': (x1 + x2) // 2,
+                        'center_y': (y1 + y2) // 2
+                    })
+            except (ValueError, IndexError):
+                # Skip malformed entries
+                continue
+
+        return grounded_items
+
     def parse_dimensions_from_text(self, text):
         """Parse dimensions from plain text when JSON is not available"""
         import re
 
+        # First, try to parse grounding format
+        grounded_items = self.parse_grounding_format(text)
+
+        if grounded_items:
+            self.log(f"Extracted {len(grounded_items)} grounded text items")
+
+            # Extract just the text for dimension parsing
+            all_text = ' '.join([item['text'] for item in grounded_items])
+        else:
+            all_text = text
+
         # Find scale notation (e.g., 1:65, 1:100)
-        scale_match = re.search(r'1[:：]\s*(\d+)', text)
+        scale_match = re.search(r'1[:：]\s*(\d+)', all_text)
         scale = f"1:{scale_match.group(1)}" if scale_match else None
 
         # Find all numbers (potential dimensions)
-        numbers = re.findall(r'\b(\d+(?:\.\d+)?)\b', text)
+        numbers = re.findall(r'\b(\d+(?:\.\d+)?)\b', all_text)
         dimensions = [float(n) for n in numbers if float(n) > 10 and float(n) < 10000]
 
         if not dimensions:
@@ -186,13 +227,13 @@ class ArchitecturalExtractor:
         unit = "cm"  # default
         unit_confidence = "low"
 
-        if re.search(r'\bcm\b', text, re.IGNORECASE):
+        if re.search(r'\bcm\b', all_text, re.IGNORECASE):
             unit = "cm"
             unit_confidence = "high"
-        elif re.search(r'\bmm\b', text, re.IGNORECASE):
+        elif re.search(r'\bmm\b', all_text, re.IGNORECASE):
             unit = "mm"
             unit_confidence = "high"
-        elif re.search(r'\b[mM]\b', text):
+        elif re.search(r'\b[mM]\b', all_text):
             unit = "m"
             unit_confidence = "high"
         else:
@@ -211,7 +252,7 @@ class ArchitecturalExtractor:
         if not width or not length:
             return None
 
-        return {
+        result = {
             'scale': scale or 'unknown',
             'width': width,
             'length': length,
@@ -219,6 +260,13 @@ class ArchitecturalExtractor:
             'unit_confidence': unit_confidence,
             'all_dimensions': sorted_dims[:20]  # Limit to top 20
         }
+
+        # Add grounded items if available
+        if grounded_items:
+            result['grounded_items'] = grounded_items
+            result['total_items'] = len(grounded_items)
+
+        return result
 
     def validate_structure(self, data):
         """Validate that JSON has required fields"""
@@ -251,16 +299,45 @@ class ArchitecturalExtractor:
         return result
 
     def save_results(self, result, output_path):
-        """Save extraction results"""
+        """Save extraction results in multiple formats"""
         output_path = Path(output_path)
+        base_name = output_path.stem
 
-        if result['success']:
-            # Save structured JSON
+        if result['success'] and result['data']:
+            data = result['data']
+
+            # Save grounded data if available
+            if 'grounded_items' in data and data['grounded_items']:
+                grounded_items = data['grounded_items']
+
+                # 1. Save grounded JSON
+                grounded_json_path = output_path.parent / f"{base_name}_grounded.json"
+                grounded_json_path.write_text(json.dumps(grounded_items, indent=2), encoding='utf-8')
+                self.log(f"✓ Saved grounded JSON: {grounded_json_path}")
+
+                # 2. Save CSV
+                csv_path = output_path.parent / f"{base_name}_grounded.csv"
+                self.save_as_csv(grounded_items, csv_path)
+                self.log(f"✓ Saved CSV: {csv_path}")
+
+                # 3. Save plain text (just text, no coordinates)
+                text_path = output_path.parent / f"{base_name}_full_text.txt"
+                text_content = '\n'.join([item['text'] for item in grounded_items])
+                text_path.write_text(text_content, encoding='utf-8')
+                self.log(f"✓ Saved plain text: {text_path}")
+            else:
+                # No grounded data, save raw output as plain text
+                text_path = output_path.parent / f"{base_name}_full_text.txt"
+                text_path.write_text(result['raw_output'], encoding='utf-8')
+                self.log(f"✓ Saved extracted text: {text_path}")
+
+            # 4. Save dimension parsing attempt
+            dimensions_only = {k: v for k, v in data.items() if k not in ['grounded_items']}
             json_path = output_path.with_suffix('.json')
-            json_path.write_text(json.dumps(result['data'], indent=2), encoding='utf-8')
-            self.log(f"✓ Saved JSON: {json_path}")
+            json_path.write_text(json.dumps(dimensions_only, indent=2), encoding='utf-8')
+            self.log(f"✓ Saved dimensions JSON: {json_path}")
 
-            # Save raw output for debugging
+            # 5. Save raw output for debugging
             raw_path = output_path.with_suffix('.raw.txt')
             raw_path.write_text(result['raw_output'], encoding='utf-8')
             self.log(f"✓ Saved raw output: {raw_path}")
@@ -270,7 +347,7 @@ class ArchitecturalExtractor:
 
             return json_path
         else:
-            self.log("✗ Extraction failed - no valid JSON found", "ERROR")
+            self.log("✗ Extraction failed - no valid data found", "ERROR")
             # Save raw output for debugging
             raw_path = output_path.with_suffix('.raw.txt')
             raw_path.write_text(result['raw_output'], encoding='utf-8')
@@ -284,11 +361,50 @@ class ArchitecturalExtractor:
 
             return None
 
+    def save_as_csv(self, grounded_items, csv_path):
+        """Save grounded items as CSV"""
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            # Header
+            writer.writerow(['text', 'x1', 'y1', 'x2', 'y2', 'width', 'height', 'center_x', 'center_y'])
+            # Data
+            for item in grounded_items:
+                writer.writerow([
+                    item['text'],
+                    item['bbox'][0],
+                    item['bbox'][1],
+                    item['bbox'][2],
+                    item['bbox'][3],
+                    item['width'],
+                    item['height'],
+                    item['center_x'],
+                    item['center_y']
+                ])
+
     def print_summary(self, data):
         """Print extraction summary"""
         print("\n" + "="*60)
         print("EXTRACTION SUMMARY")
         print("="*60)
+
+        # Show grounded items info if available
+        if 'grounded_items' in data and data['grounded_items']:
+            total = data.get('total_items', len(data['grounded_items']))
+            print(f"✓ Extracted {total} text items with locations")
+
+            # Show first 10 items as sample
+            print("\nSample text items (first 10):")
+            for i, item in enumerate(data['grounded_items'][:10], 1):
+                text = item['text'][:50]  # Truncate long text
+                print(f"  {i}. {text}")
+
+            if total > 10:
+                print(f"  ... and {total - 10} more items")
+
+            print("\n" + "-"*60)
+
+        # Show dimension parsing attempt
+        print("\nDimension Parsing (experimental):")
         print(f"Scale: {data.get('scale', 'N/A')}")
 
         unit = data.get('unit', 'unknown')
@@ -314,7 +430,6 @@ class ArchitecturalExtractor:
             if area_m2:
                 print(f"Calculated Area: {area_m2:.2f} m²")
 
-        print(f"\nAll dimensions found: {data.get('all_dimensions', [])}")
         print("="*60 + "\n")
 
     def process(self, input_path, output_path=None, custom_prompt=None, dpi=300):
