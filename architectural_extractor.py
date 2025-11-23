@@ -18,30 +18,8 @@ from PIL import Image
 class ArchitecturalExtractor:
     """Extract architectural dimensions and measurements from floor plans"""
 
-    # Ultra-simple prompt to avoid Ollama batching issues
-    EXTRACTION_PROMPT = """<image>
-Extract: scale, width, length, unit, all dimensions as JSON."""
-
-    # Detailed prompt (use with --prompt flag if simple one works)
-    EXTRACTION_PROMPT_DETAILED = """<image>
-
-Extract from this floor plan as JSON:
-1. Scale (e.g., "1:65")
-2. Overall building width and length (largest dimensions)
-3. Unit of measurement (cm, mm, or m) - check labels, legend, or infer from dimension values
-4. All visible dimension numbers
-
-Output JSON:
-{
-  "scale": "1:65",
-  "width": 840,
-  "length": 670,
-  "unit": "cm",
-  "unit_confidence": "high",
-  "all_dimensions": [840, 670, 370, 510, 253, 240, 150, 90, 20]
-}
-
-unit_confidence: "high" (explicit), "medium" (inferred), "low" (guessed)"""
+    # Proven pattern from pdf_to_markdown.py - simple and direct
+    EXTRACTION_PROMPT = "<image>\n<|grounding|>Extract all text and numbers from this image."
 
     def __init__(self, verbose=True):
         self.verbose = verbose
@@ -87,10 +65,10 @@ unit_confidence: "high" (explicit), "medium" (inferred), "low" (guessed)"""
                 text=True,
                 encoding='utf-8',  # Force UTF-8
                 errors='replace',  # Replace invalid characters instead of failing
-                timeout=600,  # 10 minutes
+                timeout=300,  # 5 minutes (same as working pdf_to_markdown.py)
             )
         except subprocess.TimeoutExpired:
-            self.log("ERROR: Command timed out after 10 minutes", "ERROR")
+            self.log("ERROR: Command timed out after 5 minutes", "ERROR")
             return {
                 'success': False,
                 'data': None,
@@ -138,13 +116,18 @@ unit_confidence: "high" (explicit), "medium" (inferred), "low" (guessed)"""
 
         self.log(f"Raw output preview (first 200 chars): {raw_output[:200]}")
 
-        # Extract JSON from output
+        # Try to extract JSON first (if model returned it)
         extracted_json = self.extract_json(raw_output)
 
+        # If no JSON, parse dimensions from text
+        if not extracted_json:
+            self.log("No JSON found, parsing dimensions from text...")
+            extracted_json = self.parse_dimensions_from_text(raw_output)
+
         if extracted_json:
-            self.log("✓ Successfully extracted JSON")
+            self.log("✓ Successfully extracted dimensions")
         else:
-            self.log("✗ Failed to extract valid JSON from output", "WARNING")
+            self.log("✗ Failed to extract dimensions from output", "WARNING")
 
         return {
             'success': extracted_json is not None,
@@ -180,6 +163,62 @@ unit_confidence: "high" (explicit), "medium" (inferred), "low" (guessed)"""
             pass
 
         return None
+
+    def parse_dimensions_from_text(self, text):
+        """Parse dimensions from plain text when JSON is not available"""
+        import re
+
+        # Find scale notation (e.g., 1:65, 1:100)
+        scale_match = re.search(r'1[:：]\s*(\d+)', text)
+        scale = f"1:{scale_match.group(1)}" if scale_match else None
+
+        # Find all numbers (potential dimensions)
+        numbers = re.findall(r'\b(\d+(?:\.\d+)?)\b', text)
+        dimensions = [float(n) for n in numbers if float(n) > 10 and float(n) < 10000]
+
+        if not dimensions:
+            return None
+
+        # Sort to find largest (likely overall dimensions)
+        sorted_dims = sorted(dimensions, reverse=True)
+
+        # Detect unit
+        unit = "cm"  # default
+        unit_confidence = "low"
+
+        if re.search(r'\bcm\b', text, re.IGNORECASE):
+            unit = "cm"
+            unit_confidence = "high"
+        elif re.search(r'\bmm\b', text, re.IGNORECASE):
+            unit = "mm"
+            unit_confidence = "high"
+        elif re.search(r'\b[mM]\b', text):
+            unit = "m"
+            unit_confidence = "high"
+        else:
+            # Infer from dimension values
+            if sorted_dims[0] > 1000:
+                unit = "mm"
+                unit_confidence = "medium"
+            elif sorted_dims[0] < 50:
+                unit = "m"
+                unit_confidence = "medium"
+
+        # Get overall dimensions (two largest)
+        width = sorted_dims[0] if len(sorted_dims) > 0 else None
+        length = sorted_dims[1] if len(sorted_dims) > 1 else None
+
+        if not width or not length:
+            return None
+
+        return {
+            'scale': scale or 'unknown',
+            'width': width,
+            'length': length,
+            'unit': unit,
+            'unit_confidence': unit_confidence,
+            'all_dimensions': sorted_dims[:20]  # Limit to top 20
+        }
 
     def validate_structure(self, data):
         """Validate that JSON has required fields"""
